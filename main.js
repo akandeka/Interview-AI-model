@@ -66,6 +66,12 @@ if (process.platform === "linux") {
   // On X11 only; harmless on Wayland. Prevents Chromium from spawning a
   // compositor process that adds another X11 client.
   app.commandLine.appendSwitch("in-process-gpu");
+  // Force X11 backend via XWayland even on Wayland sessions.
+  // Wayland natively forbids client-side alwaysOnTop layering and causes the overlay
+  // to get buried behind other windows on blur. Running via XWayland allows
+  // alwaysOnTop (_NET_WM_STATE_ABOVE) and toolbar hints to work properly in GNOME/Mutter.
+  app.commandLine.appendSwitch("ozone-platform", "x11");
+  app.commandLine.appendSwitch("ozone-platform-hint", "x11");
 }
 
 // Keep Chromium network noise out of the terminal; app-level logs still go through Winston.
@@ -107,6 +113,26 @@ const llmService = require("./src/services/llm.service");
 // Managers
 const windowManager = require("./src/managers/window.manager");
 const sessionManager = require("./src/managers/session.manager");
+
+// ── Clean Terminal Shutdown on SIGINT (Ctrl+C) and SIGTERM ──
+const handleShutdown = (signal) => {
+  logger.info(`Received ${signal} (Ctrl+C) — cleanly terminating application`);
+  try {
+    globalShortcut.unregisterAll();
+    speechService.shutdown();
+    windowManager.destroyAllWindows();
+    app.quit();
+  } catch (err) {
+    logger.error("Error during graceful shutdown:", { error: err && err.message });
+  }
+  // Force process exit to ensure all background loops, watchers, and threads stop
+  setTimeout(() => {
+    process.exit(0);
+  }, 100);
+};
+
+process.on("SIGINT", () => handleShutdown("SIGINT"));
+process.on("SIGTERM", () => handleShutdown("SIGTERM"));
 
 class ApplicationController {
   constructor() {
@@ -259,7 +285,8 @@ class ApplicationController {
       }
       const isFirstRun = status.needsOnboarding;
 
-      await windowManager.initializeWindows({ showMainWindow: !isFirstRun });
+      // Always show the main window (navbar) on startup — skip onboarding wizard
+      await windowManager.initializeWindows({ showMainWindow: true });
       this.setupGlobalShortcuts();
 
       // Initialize default stealth mode with terminal icon
@@ -268,27 +295,9 @@ class ApplicationController {
       this.starting = false;
       this.isReady = true;
 
-      // Launch the onboarding wizard if this is the first run.
-      if (this.isFirstRun) {
-        // Defer slightly so all windows finish loading before we pop
-        // the wizard on top of them.
-        setTimeout(() => {
-          try {
-            windowManager.showOnboarding();
-            windowManager.broadcastToAllWindows("first-run", status);
-            logger.info("First-run onboarding: wizard opened");
-          } catch (e) {
-            logger.warn("Could not open first-run onboarding window", {
-              error: e.message
-            });
-            // Fallback to legacy settings prompt
-            try { this.showSettings(); } catch (_) { /* ignore */ }
-          }
-        }, 800);
-      } else {
-        // Already configured — mark completed so we never nag again.
-        this.firstRunManager.markCompleted();
-      }
+      // Always mark first run as completed so we never show onboarding
+      this.isFirstRun = false;
+      this.firstRunManager.markCompleted();
 
       logger.info("Application initialized successfully", {
         windowCount: Object.keys(windowManager.getWindowStats().windows).length,
@@ -386,12 +395,32 @@ class ApplicationController {
         callback(granted);
       }
     );
+
+    // On Linux/Wayland, desktopCapturer.getSources() triggers the XDG Desktop
+    // Portal "Share Screen" dialog. By setting a display-media request handler
+    // we can auto-grant access to the entire screen without user interaction.
+    if (process.platform === 'linux') {
+      appSession.setDisplayMediaRequestHandler((request, callback) => {
+        // Auto-select the first screen source
+        desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+          if (sources.length > 0) {
+            callback({ video: sources[0], audio: 'loopback' });
+          } else {
+            callback({});
+          }
+        }).catch(() => {
+          callback({});
+        });
+      });
+      logger.debug('Display media request handler set for Linux auto-capture');
+    }
   }
 
   setupGlobalShortcuts() {
     const shortcuts = {
       "CommandOrControl+Shift+S": () => this.triggerScreenshotOCR(),
       "CommandOrControl+Shift+V": () => windowManager.toggleVisibility(),
+      "CommandOrControl+Shift+Q": () => this.forceQuitApp(),
       "CommandOrControl+Shift+I": () => windowManager.toggleInteraction(),
       "CommandOrControl+Shift+C": () => windowManager.switchToWindow("chat"),
       "CommandOrControl+Shift+\\": () => this.clearSessionMemory(),
@@ -942,6 +971,19 @@ class ApplicationController {
         process.exit(1);
       }
     });
+  }
+
+  forceQuitApp() {
+    logger.info("Force quit triggered (Ctrl+Shift+Q)");
+    try {
+      globalShortcut.unregisterAll();
+      speechService.shutdown();
+      windowManager.destroyAllWindows();
+      app.quit();
+    } catch (_) {}
+    setTimeout(() => {
+      process.exit(0);
+    }, 100);
   }
 
   toggleSpeechRecognition() {

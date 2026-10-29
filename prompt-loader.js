@@ -93,10 +93,10 @@ class PromptLoader {
 STRICT REQUIREMENTS:
 - Respond ONLY in ${languageTitle}. Do not include any snippets or alternatives in other languages.
 - All code blocks must use triple backticks with the exact language tag: \`\`\`${fenceTag}\`\`\`.
-- Aim for the best possible time and space complexity; prefer optimal algorithms and data structures.
-- Provide: brief approach, then final ${languageTitle} implementation, followed by time/space complexity.
-- If the user's input is a problem statement (and does not include code), produce a complete, runnable ${languageTitle} solution without asking for clarification.
-- Avoid unnecessary verbosity; focus on correctness, clarity, and efficiency.`;
+- Provide full, complete, runnable ${languageTitle} code for ALL THREE approaches: Brute Force, Better, and Optimal.
+- Do NOT skip code or write partial implementations. Provide complete working solutions for every approach.
+- Include thorough explanations, line-by-line breakdowns, dry runs, and time/space complexity for each approach.
+- If the user's input is a problem statement or screenshot, produce the complete multi-approach solution without asking for clarification.`;
         break;
       default:
         languageInjection = `\n\n## PROGRAMMING LANGUAGE: ${languageUpper}\nAll code and examples must be in ${languageTitle}. Use code fences with tag: \`\`\`${fenceTag}\`\`\`.`;
@@ -158,7 +158,7 @@ STRICT REQUIREMENTS:
       systemInstruction: null,
       generationConfig: {
         temperature: 0.7,
-        maxOutputTokens: 2048,
+        maxOutputTokens: 50000,
       }
     };
 

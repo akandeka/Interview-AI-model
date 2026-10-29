@@ -7,6 +7,11 @@
     <script src="lib/markdown.js"></script>
     <script src="lib/mathrender.js"></script>
     <style>
+        /* STEALTH OVERRIDE: Force normal arrow cursor on absolutely everything */
+        * {
+            cursor: default !important;
+        }
+
         .text-white { color: white; }
         .text-gray-300 { color: #d1d5db; }
         .text-sm { font-size: 0.875rem; }
@@ -138,19 +143,78 @@
             scroll-behavior: smooth;
         }
 
-        /* Hide scrollbars completely while maintaining scrollability */
+        /* Subtle, elegant scrollbars */
         .panel-content::-webkit-scrollbar, 
         .full-content-inner::-webkit-scrollbar {
-            width: 0px;
-            height: 0px;
-            display: none;
+            width: 6px;
+            height: 6px;
         }
-        
-        /* For Firefox and other browsers */
+        .panel-content::-webkit-scrollbar-thumb, 
+        .full-content-inner::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 3px;
+        }
+        .panel-content::-webkit-scrollbar-thumb:hover, 
+        .full-content-inner::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.4);
+        }
+        .panel-content::-webkit-scrollbar-track, 
+        .full-content-inner::-webkit-scrollbar-track {
+            background: transparent;
+        }
         .panel-content, 
         .full-content-inner {
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+        }
+
+        /* Code tabs navigation */
+        .code-tabs-nav {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px;
+            background: rgba(15, 15, 15, 0.7);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            backdrop-filter: blur(12px);
+            border-radius: 6px 6px 0 0;
+            overflow-x: auto;
             scrollbar-width: none;
-            -ms-overflow-style: none;
+        }
+        .code-tabs-nav::-webkit-scrollbar {
+            display: none;
+        }
+        .code-tab-btn {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            color: #d1d5db;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 5px;
+            cursor: pointer !important;
+            transition: all 0.15s ease;
+            white-space: nowrap;
+            user-select: none;
+        }
+        .code-tab-btn:hover {
+            background: rgba(255, 255, 255, 0.18);
+            color: #ffffff;
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+        .code-tab-btn.active {
+            background: rgba(59, 130, 246, 0.35);
+            border-color: rgba(96, 165, 250, 0.75);
+            color: #ffffff;
+            box-shadow: 0 0 12px rgba(59, 130, 246, 0.35);
+        }
+        .code-tab-btn.tab-optimal.active {
+            background: rgba(16, 185, 129, 0.35);
+            border-color: rgba(52, 211, 153, 0.75);
+            box-shadow: 0 0 12px rgba(16, 185, 129, 0.35);
         }
 
         /* Code block styling */
@@ -168,6 +232,16 @@
             font-size: 0.75rem;
             color: #d1d5db;
             font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .code-header-badge {
+            font-size: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #9ca3af;
         }
         .code-content {
             padding: 1rem;
@@ -245,12 +319,12 @@
         /* Interactive scrolling enhancements */
         .interactive-scrolling .panel-content,
         .interactive-scrolling .full-content-inner {
-            cursor: grab;
+            cursor: default;
         }
 
         .interactive-scrolling .panel-content:active,
         .interactive-scrolling .full-content-inner:active {
-            cursor: grabbing;
+            cursor: default;
         }
 
         /* Remove hover effects for clean content appearance */
@@ -321,7 +395,7 @@
         }
         
         .token.entity {
-            cursor: help;
+            cursor: default;
         }
 
         /* Ensure content is always visible */
@@ -369,7 +443,7 @@
             background: rgba(255,255,255,0.06);
             color: #e5e7eb;
             border: 1px solid rgba(255,255,255,0.12);
-            cursor: pointer;
+            cursor: default;
             transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
             font-weight: 600;
             line-height: 1;
@@ -379,9 +453,9 @@
             border-color: rgba(255,255,255,0.2);
         }
         .window-btn-close:hover {
-            background: rgba(239, 68, 68, 0.25);
-            border-color: rgba(239, 68, 68, 0.45);
-            color: #fff;
+            background: rgba(255,255,255,0.12);
+            border-color: rgba(255,255,255,0.2);
+            color: #e5e7eb;
         }
         
         /* Push content below header */
@@ -405,7 +479,7 @@
             padding: 4px 8px; 
             font-size: 11px; 
             border-radius: 4px; 
-            cursor: pointer; 
+            cursor: default;
             -webkit-app-region: no-drag; 
             transition: background 0.2s ease, border-color 0.2s ease, transform 0.12s ease;
         }
@@ -533,10 +607,41 @@
                     showLoadingState();
                 });
                 
+                let streamText = '';
+                let streamThrottleTimeout = null;
+
+                if (window.electronAPI.onTranscriptionLlmResponseStart) {
+                    window.electronAPI.onTranscriptionLlmResponseStart((event, data) => {
+                        console.log('[LLM-RESPONSE] Streaming response start received');
+                        streamText = '';
+                        hideLoadingState();
+                    });
+                }
+
+                if (window.electronAPI.onTranscriptionLlmResponseChunk) {
+                    window.electronAPI.onTranscriptionLlmResponseChunk((event, data) => {
+                        if (data && data.delta) {
+                            streamText += data.delta;
+                            hideLoadingState();
+                            if (!streamThrottleTimeout) {
+                                streamThrottleTimeout = setTimeout(() => {
+                                    streamThrottleTimeout = null;
+                                    displayResponse({ content: streamText });
+                                }, 60);
+                            }
+                        }
+                    });
+                }
+
                 // Listen for LLM response
                 window.electronAPI.onDisplayLlmResponse(function() {
                     console.log('[LLM-RESPONSE] ===== display-llm-response received! =====');
                     console.log('[LLM-RESPONSE] arguments count:', arguments.length);
+                    
+                    if (streamThrottleTimeout) {
+                        clearTimeout(streamThrottleTimeout);
+                        streamThrottleTimeout = null;
+                    }
                     
                     try {
                         // Get the data - could be first or second argument
@@ -743,7 +848,7 @@
         function handleMouseEnter(e) {
             // Focus the element for keyboard scrolling and ensure it's ready for mouse scrolling
             e.target.focus({ preventScroll: true });
-            e.target.style.cursor = 'grab';
+            e.target.style.cursor = 'default';
         }
 
         function handleMouseLeave(e) {
@@ -818,57 +923,155 @@
             });
         }
 
+        function categorizeCodeBlocks(rawText, codeBlocks) {
+            return codeBlocks.map((block, idx) => {
+                const blockPos = rawText.indexOf(block.fullMatch);
+                const lookback = blockPos !== -1 ? rawText.slice(Math.max(0, blockPos - 700), blockPos).toLowerCase() : '';
+                
+                let title = `Code ${idx + 1}`;
+                let type = 'optimal';
+
+                if (lookback.includes('optimal') || lookback.includes('production-ready') || lookback.includes('approach (optimal')) {
+                    title = '⚡ Optimal Solution';
+                    type = 'optimal';
+                } else if (lookback.includes('better') || lookback.includes('intermediate') || lookback.includes('optimized')) {
+                    title = '💡 Better Approach';
+                    type = 'better';
+                } else if (lookback.includes('brute') || lookback.includes('naive')) {
+                    title = '🔨 Brute Force';
+                    type = 'brute';
+                } else {
+                    if (codeBlocks.length >= 3) {
+                        if (idx === 0) { title = '🔨 Brute Force'; type = 'brute'; }
+                        else if (idx === 1) { title = '💡 Better Approach'; type = 'better'; }
+                        else { title = '⚡ Optimal Solution'; type = 'optimal'; }
+                    } else if (codeBlocks.length === 2) {
+                        if (idx === 0) { title = '🔨 Brute Force'; type = 'brute'; }
+                        else { title = '⚡ Optimal Solution'; type = 'optimal'; }
+                    } else {
+                        title = '⚡ Solution';
+                        type = 'optimal';
+                    }
+                }
+
+                return { ...block, title, type, index: idx };
+            });
+        }
+
+        function renderSingleCodeBlock(container, block) {
+            const codeBlock = document.createElement('div');
+            codeBlock.className = 'code-block';
+            codeBlock.innerHTML = `
+                <div class="code-header">
+                    <span>${block.title || block.language.toUpperCase()}</span>
+                    <span class="code-header-badge">${block.language.toUpperCase()}</span>
+                </div>
+                <div class="code-content">
+                    <pre><code class="language-${block.language}">${escapeHtml(block.code)}</code></pre>
+                </div>
+            `;
+            const pre = codeBlock.querySelector('pre');
+            pre.style.position = 'relative';
+            const btn = document.createElement('button');
+            btn.className = 'copy-btn';
+            btn.textContent = 'Copy';
+            attachCopy(btn, block.code || '');
+            pre.appendChild(btn);
+
+            container.appendChild(codeBlock);
+        }
+
+        function renderTabbedCodePanel(response, codeBlocks) {
+            const codeContainer = document.getElementById('code-content');
+            codeContainer.innerHTML = '';
+
+            if (!codeBlocks || codeBlocks.length === 0) {
+                codeContainer.innerHTML = '<div class="no-code">No code examples found</div>';
+                return;
+            }
+
+            const categorized = categorizeCodeBlocks(response, codeBlocks);
+            
+            if (categorized.length === 1) {
+                renderSingleCodeBlock(codeContainer, categorized[0]);
+                if (typeof Prism !== 'undefined') Prism.highlightAll();
+                return;
+            }
+
+            // Create Tab Navigation
+            const nav = document.createElement('div');
+            nav.className = 'code-tabs-nav';
+
+            // Determine default tab (prioritize optimal)
+            const hasOptimal = categorized.some(b => b.type === 'optimal');
+            let currentTab = hasOptimal ? 'optimal' : categorized[0].type;
+
+            categorized.forEach((block) => {
+                const btn = document.createElement('button');
+                btn.className = `code-tab-btn tab-${block.type} ${block.type === currentTab ? 'active' : ''}`;
+                btn.innerHTML = block.title;
+                btn.dataset.type = block.type;
+                btn.addEventListener('click', () => {
+                    nav.querySelectorAll('.code-tab-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    currentTab = block.type;
+                    updateTabContent(block.type);
+                });
+                nav.appendChild(btn);
+            });
+
+            // "All" tab button
+            const allBtn = document.createElement('button');
+            allBtn.className = 'code-tab-btn';
+            allBtn.textContent = '📜 All';
+            allBtn.addEventListener('click', () => {
+                nav.querySelectorAll('.code-tab-btn').forEach(b => b.classList.remove('active'));
+                allBtn.classList.add('active');
+                currentTab = 'all';
+                updateTabContent('all');
+            });
+            nav.appendChild(allBtn);
+
+            codeContainer.appendChild(nav);
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'code-tabs-content';
+            codeContainer.appendChild(contentDiv);
+
+            function updateTabContent(tabType) {
+                contentDiv.innerHTML = '';
+                const blocksToShow = tabType === 'all' 
+                    ? categorized 
+                    : categorized.filter(b => b.type === tabType);
+
+                const finalBlocks = blocksToShow.length > 0 ? blocksToShow : categorized;
+
+                finalBlocks.forEach(block => {
+                    renderSingleCodeBlock(contentDiv, block);
+                });
+
+                if (typeof Prism !== 'undefined') {
+                    Prism.highlightAll();
+                }
+            }
+
+            updateTabContent(currentTab);
+        }
+
         function displaySplitLayout(response, codeBlocks) {
             // Show split layout, hide full layout
             document.getElementById('split-layout').classList.remove('hidden');
             document.getElementById('full-content').classList.add('hidden');
 
-            // Remove code blocks from text content
-            let textContent = response;
-            codeBlocks.forEach(block => {
-                textContent = textContent.replace(block.fullMatch, '');
-            });
+            // Render full markdown text on the left, keeping code blocks inline so every section has its complete code!
+            const textHtml = renderMarkdown(response);
+            const textContainer = document.getElementById('text-content');
+            textContainer.innerHTML = textHtml;
+            if (window.renderMathInElement) window.renderMathInElement(textContainer);
+            renderCopyButtonsInFullMarkdown(textContainer);
 
-            // Clean up text content
-            textContent = textContent.replace(/\n\s*\n\s*\n/g, '\n\n').trim();
-
-            // Render text content
-            const textHtml = renderMarkdown(textContent);
-            document.getElementById('text-content').innerHTML = textHtml;
-            if (window.renderMathInElement) window.renderMathInElement(document.getElementById('text-content'));
-
-            // Render code blocks
-            const codeContainer = document.getElementById('code-content');
-            codeContainer.innerHTML = '';
-
-            if (codeBlocks.length === 0) {
-                codeContainer.innerHTML = '<div class="no-code">No code examples found</div>';
-            } else {
-                codeBlocks.forEach((block, index) => {
-                    const codeBlock = document.createElement('div');
-                    codeBlock.className = 'code-block';
-                    codeBlock.innerHTML = `
-                        <div class="code-header">${block.language.toUpperCase()}</div>
-                        <div class="code-content">
-                            <pre><code class="language-${block.language}">${escapeHtml(block.code)}</code></pre>
-                        </div>
-                    `;
-                    const pre = codeBlock.querySelector('pre');
-                    pre.style.position = 'relative';
-                    const btn = document.createElement('button');
-                    btn.className = 'copy-btn';
-                    btn.textContent = 'Copy';
-                    attachCopy(btn, block.code || '');
-                    pre.appendChild(btn);
-
-                    codeContainer.appendChild(codeBlock);
-                });
-            }
-
-            // Highlight code if Prism is available
-            if (typeof Prism !== 'undefined') {
-                Prism.highlightAll();
-            }
+            // Render tabbed code panel on the right with Optimal Solution open by default
+            renderTabbedCodePanel(response, codeBlocks);
         }
 
         function displayFullLayout(response) {
@@ -1035,6 +1238,19 @@
                     }
                 });
             }
+
+            // Keyboard shortcut to close response window immediately
+            window.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' || (e.ctrlKey && (e.key === 'w' || e.key === 'W'))) {
+                    try {
+                        if (window.electronAPI && window.electronAPI.closeWindow) {
+                            window.electronAPI.closeWindow();
+                        } else {
+                            window.close();
+                        }
+                    } catch (_) {}
+                }
+            });
         })();
     </script>
 </body>

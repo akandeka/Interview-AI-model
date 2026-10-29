@@ -28,8 +28,8 @@ class LLMService {
     try {
       this.client = new GoogleGenAI({ apiKey });
       
-      // Use the configured model name (default: gemini-3.5-flash)
-      this.model = config.get('llm.gemini.model');
+      // Use the configured model name (default: gemini-2.5-flash)
+      this.model = config.get('llm.gemini.model') || 'gemini-2.5-flash';
       this.isInitialized = true;
       
       logger.info('Gemini AI client initialized successfully', {
@@ -48,7 +48,7 @@ class LLMService {
       temperature: 0.7,
       topK: 40,
       topP: 0.95,
-      maxOutputTokens: 4096,
+      maxOutputTokens: 50000,
       thinkingConfig: { thinkingBudget: 0 }
     };
 
@@ -219,7 +219,7 @@ class LLMService {
       });
 
       if (config.get('llm.gemini.fallbackEnabled')) {
-        return this.generateFallbackResponse('[image]', activeSkill);
+        return this.generateFallbackResponse('[image]', activeSkill, error);
       }
       throw error;
     }
@@ -298,7 +298,10 @@ class LLMService {
   }
 
   formatImageInstruction(activeSkill, programmingLanguage) {
-    const langNote = programmingLanguage ? ` Use only ${programmingLanguage.toUpperCase()} for any code.` : '';
+    const langNote = programmingLanguage ? ` Use only ${programmingLanguage.toUpperCase()} for all code blocks.` : '';
+    if ((activeSkill || '').toLowerCase() === 'dsa') {
+      return `Analyze this image for the DSA problem. Provide a complete, highly detailed response covering all 3 approaches: 1. Brute Force Approach, 2. Better Approach, and 3. Optimal Approach. You MUST include complete, runnable, production-ready code for the Optimal Approach as well as for the Brute Force and Better approaches.${langNote}`;
+    }
     return `Analyze this image for a ${activeSkill.toUpperCase()} question. Extract the problem concisely and provide the best possible solution with explanation and final code.${langNote}`;
   }
 
@@ -935,7 +938,10 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
           const isModelUnavailable = errorInfo.type === 'RATE_LIMIT_ERROR' ||
             error.message.includes('503') ||
             error.message.includes('UNAVAILABLE') ||
-            error.message.includes('high demand');
+            error.message.includes('high demand') ||
+            error.message.includes('404') ||
+            error.message.includes('NOT_FOUND') ||
+            error.message.includes('no longer available');
 
           if (isModelUnavailable && modelName !== modelsToTry[modelsToTry.length - 1]) {
             logger.info(`Switching to fallback model after ${modelName} unavailable`, {
@@ -1092,7 +1098,10 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
           const isModelUnavailable = errorInfo.type === 'RATE_LIMIT_ERROR' ||
             error.message.includes('503') ||
             error.message.includes('UNAVAILABLE') ||
-            error.message.includes('high demand');
+            error.message.includes('high demand') ||
+            error.message.includes('404') ||
+            error.message.includes('NOT_FOUND') ||
+            error.message.includes('no longer available');
 
           if (isModelUnavailable && modelName !== modelsToTry[modelsToTry.length - 1]) {
             break; // try next fallback model
@@ -1323,17 +1332,11 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
     });
   }
 
-  generateFallbackResponse(text, activeSkill) {
-    logger.info('Generating fallback response', { activeSkill });
+  generateFallbackResponse(text, activeSkill, error = null) {
+    logger.info('Generating fallback response', { activeSkill, error: error?.message });
 
-    const fallbackResponses = {
-      'dsa': 'This appears to be a data structures and algorithms problem. Consider breaking it down into smaller components and identifying the appropriate algorithm or data structure to use.',
-      'system-design': 'For this system design question, consider scalability, reliability, and the trade-offs between different architectural approaches.',
-      'programming': 'This looks like a programming challenge. Focus on understanding the requirements, edge cases, and optimal time/space complexity.',
-      'default': 'I can help analyze this content. Please ensure your Gemini API key is properly configured for detailed analysis.'
-    };
-
-    const response = fallbackResponses[activeSkill] || fallbackResponses.default;
+    const errorDetail = error?.message ? `\n\n*Error details: ${error.message}*` : '';
+    const response = `⚠️ **Unable to generate AI solution**\n\nThe Gemini API request could not be completed after trying available models.${errorDetail}\n\nPlease check your internet connection or verify your Gemini API key and quota.`;
     
     return {
       response,
@@ -1553,13 +1556,8 @@ Remember: Be intelligent about filtering - only provide detailed responses when 
           model: modelName
         });
 
-        const isModelUnavailable = error.message.includes('503') ||
-          error.message.includes('UNAVAILABLE') ||
-          error.message.includes('high demand');
-
-        if (!isModelUnavailable && modelName === primaryModel) {
-          break;
-        }
+        // Log and continue to try next fallback model
+        logger.warn(`Model ${modelName} failed, trying next fallback model if available...`);
       }
     }
 

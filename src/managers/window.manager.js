@@ -359,6 +359,7 @@ class WindowManager {
         useContentSize: windowConfig.useContentSize || false,
         thickFrame: false,
         focusable: true,
+        type: process.platform === 'linux' ? 'toolbar' : undefined,
         ...(process.platform === 'darwin' && {
           titleBarStyle: 'hiddenInset',
           trafficLightPosition: { x: -100, y: -100 },
@@ -381,6 +382,7 @@ class WindowManager {
         closable: false,
         hasShadow: false,
         thickFrame: false,
+        type: process.platform === 'linux' ? 'toolbar' : undefined,
         ...(process.platform === 'darwin' && {
           titleBarStyle: 'hiddenInset',
           trafficLightPosition: { x: -100, y: -100 },
@@ -607,14 +609,33 @@ class WindowManager {
       }, 500);
       
     } else {
-      // Linux and other platforms
-      window.setAlwaysOnTop(true);
+      // Linux and other platforms — use 'screen-saver' level for strongest
+      // always-on-top enforcement so the overlay stays above all other apps.
+      try {
+        window.setAlwaysOnTop(true, 'screen-saver', 1);
+      } catch {
+        window.setAlwaysOnTop(true);
+      }
       
       setTimeout(() => {
         if (!window.isDestroyed()) {
-          window.setAlwaysOnTop(true);
+          try {
+            window.setAlwaysOnTop(true, 'screen-saver', 1);
+          } catch {
+            window.setAlwaysOnTop(true);
+          }
         }
       }, 100);
+
+      setTimeout(() => {
+        if (!window.isDestroyed()) {
+          try {
+            window.setAlwaysOnTop(true, 'screen-saver', 1);
+          } catch {
+            window.setAlwaysOnTop(true);
+          }
+        }
+      }, 500);
     }
 
     // Ensure window appears on all workspaces/desktops initially
@@ -647,7 +668,15 @@ class WindowManager {
               }
             }, 50);
           } else {
-            window.setAlwaysOnTop(true);
+            // Linux/Windows: set always on top and raise window to top of stack
+            try {
+              window.setAlwaysOnTop(true, 'screen-saver', 1);
+            } catch {
+              window.setAlwaysOnTop(true);
+            }
+            if (typeof window.moveTop === 'function') {
+              try { window.moveTop(); } catch (_) {}
+            }
           }
         } catch (error) {
           logger.debug('Error in enforceAlwaysOnTop', { error: error.message });
@@ -863,17 +892,35 @@ class WindowManager {
         }, 300);
       }, 50);
     } else {
-      // Linux/Windows
+      // Linux/Windows — keep overlay windows visible across all workspaces
+      // and enforce aggressive always-on-top so they stay above other apps.
       win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-      win.setAlwaysOnTop(true);
+      try {
+        win.setAlwaysOnTop(true, 'screen-saver', 1);
+      } catch {
+        win.setAlwaysOnTop(true);
+      }
+      if (typeof win.moveTop === 'function') {
+        try { win.moveTop(); } catch (_) {}
+      }
       win.show();
-      win.focus();
       setTimeout(() => {
         if (win.isDestroyed()) return;
-        if (!isLLM) {
+        // Keep main and LLM windows visible on all workspaces so they
+        // persist when the user switches to another application.
+        const mainWin = this.windows.get('main');
+        const keepVisible = isLLM || (mainWin && !mainWin.isDestroyed() && win.id === mainWin.id);
+        if (!keepVisible) {
           win.setVisibleOnAllWorkspaces(false);
         }
-        win.setAlwaysOnTop(true);
+        try {
+          win.setAlwaysOnTop(true, 'screen-saver', 1);
+        } catch {
+          win.setAlwaysOnTop(true);
+        }
+        if (typeof win.moveTop === 'function') {
+          try { win.moveTop(); } catch (_) {}
+        }
       }, 500);
     }
 
@@ -924,9 +971,12 @@ class WindowManager {
   }
 
   setupScreenCaptureAvailabilityWatcher() {
-    // Avoid screencast portal errors on Linux/Wayland by disabling periodic detection
     if (process.platform === 'linux') {
-      logger.info('Skipping screen capture availability watcher on Linux to avoid portal screencast errors');
+      // On Linux/Wayland, use D-Bus to monitor Mutter ScreenCast sessions.
+      // When Zoom, Google Meet, or any app starts screen sharing, it creates
+      // a session via org.gnome.Mutter.ScreenCast. We detect new child
+      // session objects appearing under that path and auto-hide all windows.
+      this.setupLinuxScreenShareDetector();
       return;
     }
 
@@ -990,6 +1040,163 @@ class WindowManager {
     }
   }
 
+  /**
+   * Linux/Wayland screen-share detector.
+   *
+   * Strategy: spawn a `dbus-monitor` process that watches the session bus for
+   * any D-Bus traffic on the `org.gnome.Mutter.ScreenCast` interface.  When
+   * Zoom / Google Meet / OBS / any Wayland app starts screen sharing, Mutter
+   * creates a ScreenCast session object.  We detect the `CreateSession` call
+   * and mark screen-sharing as active, then poll until the session disappears.
+   *
+   * As a fallback, we also periodically introspect the ScreenCast object path
+   * to see if any child session nodes exist (sessions show up as sub-objects
+   * like `/org/gnome/Mutter/ScreenCast/Session/uXXXXX`).
+   */
+  setupLinuxScreenShareDetector() {
+    // By default, auto-hiding on screen-share is disabled so you can actually
+    // receive and read AI answers during Google Meet, Zoom, or technical interviews.
+    // (To keep the overlay off the screen-share, share only a single application Window).
+    // Set AUTO_HIDE_ON_SCREEN_SHARE=true in .env only if you want the app to auto-hide itself.
+    if (process.env.AUTO_HIDE_ON_SCREEN_SHARE !== 'true') {
+      logger.info('Linux screen-share auto-hiding disabled by default (allows AI responses during Google Meet/Zoom)');
+      return;
+    }
+
+    const { spawn, execFile } = require('child_process');
+
+    logger.info('Starting Linux/Wayland screen-share detector via D-Bus');
+
+    // ── 1.  Realtime listener via dbus-monitor ──────────────────────────
+    try {
+      const monitor = spawn('dbus-monitor', [
+        '--session',
+        "type='method_call',interface='org.gnome.Mutter.ScreenCast',member='CreateSession'",
+      ], { stdio: ['ignore', 'pipe', 'ignore'] });
+
+      this._dbusMonitorProcess = monitor;
+
+      monitor.stdout.on('data', (data) => {
+        const text = data.toString();
+        if (text.includes('CreateSession')) {
+          logger.info('D-Bus: detected Mutter ScreenCast CreateSession — screen sharing starting');
+          // Give a tiny delay so the session object actually appears
+          setTimeout(() => this.startScreenSharingMode(), 300);
+        }
+      });
+
+      monitor.on('error', (err) => {
+        logger.warn('dbus-monitor spawn failed; falling back to polling only', { error: err.message });
+      });
+
+      monitor.on('close', (code) => {
+        logger.debug('dbus-monitor process exited', { code });
+        this._dbusMonitorProcess = null;
+      });
+    } catch (err) {
+      logger.warn('Could not start dbus-monitor', { error: err.message });
+    }
+
+    // ── 2.  Polling fallback: multiple detection strategies ───────────────
+    //    a) Introspect Mutter ScreenCast for child session nodes
+    //    b) Check PipeWire for active screen-cast video stream nodes
+    //    c) Check for xdg-desktop-portal screencast sessions
+    this._screenSharePollInterval = setInterval(() => {
+      let detectedByMutter = false;
+      let detectedByPipeWire = false;
+      let checksComplete = 0;
+      const totalChecks = 2;
+
+      const evaluateResults = () => {
+        checksComplete++;
+        if (checksComplete < totalChecks) return;
+
+        const sharingDetected = detectedByMutter || detectedByPipeWire;
+
+        if (sharingDetected && !this.isScreenBeingShared) {
+          logger.info('Poll: screen sharing detected — hiding windows', {
+            mutter: detectedByMutter,
+            pipewire: detectedByPipeWire
+          });
+          this.startScreenSharingMode();
+        } else if (!sharingDetected && this.isScreenBeingShared) {
+          logger.info('Poll: no screen sharing detected — restoring windows');
+          this.stopScreenSharingMode();
+        }
+      };
+
+      // Check a) Mutter ScreenCast sessions — look for child Session objects
+      //    which only exist when screen sharing is actively happening.
+      execFile('gdbus', [
+        'introspect', '--session',
+        '-d', 'org.gnome.Mutter.ScreenCast',
+        '-o', '/org/gnome/Mutter/ScreenCast',
+        '-r'
+      ], { timeout: 3000 }, (err, stdout) => {
+        // Session nodes like /org/gnome/Mutter/ScreenCast/Session/uXXXXX
+        // only appear during active screen sharing
+        if (!err && stdout && /\/Session\//.test(stdout)) {
+          detectedByMutter = true;
+        }
+        evaluateResults();
+      });
+
+      // Check b) PipeWire for active screen-cast video streams
+      //    When screen sharing is active, PipeWire creates stream nodes with
+      //    media.class = "Video/Source" originating from the portal.
+      //    IMPORTANT: The xdg-desktop-portal client node is ALWAYS present
+      //    in PipeWire even without active screen sharing. We must only match
+      //    actual Video/Source stream nodes, not just the client entry.
+      execFile('pw-cli', ['list-objects'], { timeout: 3000 }, (err, stdout) => {
+        if (!err) {
+          // Look for active video source stream nodes — these appear when
+          // screen sharing is truly active, not just from the portal client.
+          const lines = stdout.split('\n');
+          let inStreamNode = false;
+          let hasVideoSource = false;
+          let hasScreenCastOrigin = false;
+          for (const line of lines) {
+            // Only look at PipeWire Node objects (streams), skip Client objects
+            if (line.match(/^\tid \d+, type PipeWire:Interface:Node/)) {
+              // Evaluate previous node
+              if (inStreamNode && hasVideoSource && hasScreenCastOrigin) {
+                detectedByPipeWire = true;
+                break;
+              }
+              inStreamNode = true;
+              hasVideoSource = false;
+              hasScreenCastOrigin = false;
+            } else if (line.match(/^\tid \d+/)) {
+              // Non-Node object boundary — evaluate and reset
+              if (inStreamNode && hasVideoSource && hasScreenCastOrigin) {
+                detectedByPipeWire = true;
+                break;
+              }
+              inStreamNode = false;
+              hasVideoSource = false;
+              hasScreenCastOrigin = false;
+            }
+            if (inStreamNode) {
+              if (line.includes('media.class') && line.includes('Video/Source')) {
+                hasVideoSource = true;
+              }
+              if (line.includes('screencast') || line.includes('screen-cast') || line.includes('ScreenCast')) {
+                hasScreenCastOrigin = true;
+              }
+            }
+          }
+          // Check last node
+          if (inStreamNode && hasVideoSource && hasScreenCastOrigin) {
+            detectedByPipeWire = true;
+          }
+        }
+        evaluateResults();
+      });
+    }, 2000); // Check every 2 seconds
+
+    logger.info('Linux screen-share detector initialized (dbus-monitor + polling)');
+  }
+
   startScreenSharingMode() {
     if (!this.isScreenBeingShared) {
       this.isScreenBeingShared = true;
@@ -1010,6 +1217,8 @@ class WindowManager {
     
     this.windows.forEach((window, type) => {
       if (!window.isDestroyed()) {
+        // Triple safety: hide + move off-screen + make fully transparent
+        window.setOpacity(0);
         window.hide();
         window.setPosition(-10000, -10000);
       }
@@ -1019,6 +1228,13 @@ class WindowManager {
   handleScreenSharingStopped() {
     logger.info('Screen sharing mode disabled - restoring windows');
     
+    // Restore opacity for all windows first
+    this.windows.forEach((window, type) => {
+      if (!window.isDestroyed()) {
+        window.setOpacity(1);
+      }
+    });
+
     if (this.wasVisibleBeforeSharing) {
       this.moveWindowsToActiveScreen();
       this.showAllWindows();
@@ -1059,7 +1275,7 @@ class WindowManager {
     }
 
     this.windows.forEach((window, type) => {
-      if (type !== 'llmResponse') { // Don't show LLM response unless it has content
+      if (type !== 'llmResponse' && type !== 'settings' && type !== 'onboarding') {
         this.showOnCurrentDesktop(window);
       }
     });
@@ -1541,6 +1757,16 @@ class WindowManager {
     if (this.screenCaptureAvailabilityWatcher) {
       clearInterval(this.screenCaptureAvailabilityWatcher);
       this.screenCaptureAvailabilityWatcher = null;
+    }
+
+    // Clean up Linux D-Bus screen-share detector
+    if (this._screenSharePollInterval) {
+      clearInterval(this._screenSharePollInterval);
+      this._screenSharePollInterval = null;
+    }
+    if (this._dbusMonitorProcess) {
+      try { this._dbusMonitorProcess.kill(); } catch (e) { /* ignore */ }
+      this._dbusMonitorProcess = null;
     }
     
     logger.info('All windows destroyed');
